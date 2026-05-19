@@ -1,0 +1,13 @@
+Flask
+Flask-Cors
+Flask-SQLAlchemy
+Flask-SocketIO
+SQLAlchemy
+PyMySQL
+python-dotenv
+requests
+simple-websocket
+eventlet
+edge-tts
+faster-whisper
+numpy
