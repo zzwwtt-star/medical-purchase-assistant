@@ -126,21 +126,57 @@ def _get_medicine_list():
         return []
 
 
+SYMPTOM_SYNONYMS = {
+    '发烧': '发热', '退烧': '发热', '拉肚子': '腹泻', '肚子疼': '腹痛',
+    '胃痛': '腹痛', '消化不良': '腹胀', '打喷嚏': '流涕', '鼻涕': '流涕',
+    '咳痰': '痰多', '嗓子疼': '咽痛', '咽喉痛': '咽痛', '过敏性鼻炎': '鼻炎',
+    '皮肤痒': '瘙痒', '眼睛红': '结膜炎', '睡不着': '失眠', '没精神': '乏力',
+}
+
+
+def _normalize_symptom(text: str) -> str:
+    """Map colloquial terms to standardized symptom keywords."""
+    t = text.strip()
+    for k, v in SYMPTOM_SYNONYMS.items():
+        t = t.replace(k, v)
+    return t
+
+
 def _match_medicines(user_text: str, max_items: int = 5):
-    """Match relevant medicines from user input via keyword search."""
+    """Match relevant medicines from user input via keyword/substring search."""
     if not user_text or not user_text.strip():
         return ""
     medicines = _get_medicine_list()
     if not medicines:
         return ""
 
+    # Normalize colloquial terms
+    normalized = _normalize_symptom(user_text)
+
+    # Build 2-gram tokens for substring matching
+    tokens = set()
+    for text in (user_text, normalized):
+        for i in range(len(text)):
+            if i + 1 < len(text):
+                tokens.add(text[i:i + 2])
+        tokens.add(text)
+
     scored = []
     for m in medicines:
         score = 0
-        search_text = f"{m['name']} {m['symptoms']} {m['category']} {m['desc']}"
-        for ch in user_text:
-            if ch in search_text:
-                score += 1
+        symptoms = m.get('symptoms', '')
+        category = m.get('category', '')
+        name = m.get('name', '')
+        desc = m.get('desc', '')
+
+        for token in tokens:
+            if token in symptoms or token in category:
+                score += 10
+            elif token in name:
+                score += 5
+            elif token in desc:
+                score += 2
+
         if score > 0:
             scored.append((score, m))
 
@@ -236,6 +272,89 @@ def _build_chat_system_prompt(user_text: str = ""):
         "7. 每次回复控制在1-3句话，语气温和专业。\n"
         "\n" + ctx
     )
+
+
+def _build_agent_system_prompt(user_text: str = ""):
+    """System prompt for text-chat agent, with medicine recommendation marker."""
+    ctx = _match_medicines(user_text) if user_text else _build_medicine_context()
+    return (
+        "你是医疗购药助手。必须严格遵守以下规则：\n"
+        "1. 用自然对话的方式回复，像医生朋友一样说话，不要用固定的格式模板。\n"
+        "2. 推荐药品时只说药名和针对的症状，一句话带过即可。\n"
+        "   例如：\"你可以试试布洛芬，退热效果不错。\"\n"
+        "3. 绝对不要输出药品的用法用量、注意事项、禁忌人群、价格等详细信息。\n"
+        "   系统会自动弹出卡片展示这些内容。\n"
+        "4. 只有在数据库中确实没有任何对症药品时，才说\"暂无完全匹配的药品\"。\n"
+        "5. 严禁编造任何药品名称、功效、用法。不能推荐数据库中没有的药品。\n"
+        "6. 先简短询问症状关键信息（持续多久、具体部位、有无其他症状），信息足够后再推荐。\n"
+        "7. 症状严重或不确定时，优先建议就医。\n"
+        "8. 每次回复控制在1-3句话，语气温和专业。\n"
+        "\n" + ctx
+    )
+
+
+def _extract_recommendations(text: str):
+    """Detect medicine recommendations from LLM response automatically.
+
+    In a pharmacy assistant context, mentioning a medicine name is itself
+    a recommendation. Only skip when the mention is clearly negative.
+    """
+    medicines = _get_medicine_list()
+    if not medicines:
+        return []
+
+    negation_words = ['不能', '不建议', '不推荐', '禁用', '慎用', '不要用', '避免', '不可']
+
+    def _name_matches(med_name, chat_text):
+        """Check if a medicine name (or its core part) appears in the chat text."""
+        if med_name in chat_text:
+            return chat_text.find(med_name)
+        # Try stripping common suffixes to get the core name
+        suffixes = ['胶囊', '片', '颗粒', '口服液', '注射液', '滴眼液', '软膏',
+                    '栓', '糖浆', '冲剂', '丸', '口服溶液', '混悬液', '喷雾剂']
+        core = med_name
+        for sfx in suffixes:
+            if core.endswith(sfx):
+                core = core[:-len(sfx)]
+                break
+        if len(core) >= 2 and core in chat_text:
+            return chat_text.find(core)
+        # Try 3-gram sliding window from med_name against chat_text
+        for i in range(len(med_name) - 2):
+            chunk = med_name[i:i + 3]
+            if chunk in chat_text:
+                return chat_text.find(chunk)
+        return -1
+
+    results = []
+    seen = set()
+    for m in medicines:
+        if m['id'] in seen:
+            continue
+        if not m['name']:
+            continue
+        idx = _name_matches(m['name'], text)
+        if idx >= 0:
+            context = text[max(0, idx - 15):idx]
+            negated = any(nw in context for nw in negation_words)
+            if not negated:
+                results.append(_med_to_card(m))
+                seen.add(m['id'])
+
+    LOGGER.info("extract_recommendations: found_meds=%d, text_len=%d", len(results), len(text))
+    return results[:3]
+
+
+def _med_to_card(m: dict) -> dict:
+    return {
+        'id': m['id'],
+        'name': m['name'],
+        'price': m['price'],
+        'desc': m.get('desc', ''),
+        'symptoms': m.get('symptoms', ''),
+        'usage': m.get('usage', ''),
+        'notice': m.get('notice', ''),
+    }
 
 
 def _generate_tts_audio(text: str) -> str | None:

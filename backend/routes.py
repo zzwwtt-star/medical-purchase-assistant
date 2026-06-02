@@ -603,9 +603,9 @@ def ollama_chat():
     if not prompt:
         return error_response("prompt required")
 
-    from voice_pipeline import _build_chat_system_prompt
+    from voice_pipeline import _build_agent_system_prompt
 
-    system_prompt = _build_chat_system_prompt(prompt)
+    system_prompt = _build_agent_system_prompt(prompt)
 
     messages = [{"role": "system", "content": system_prompt}]
     for item in history:
@@ -666,6 +666,10 @@ def ollama_chat():
                     tts_queue.put(pending)
                 tts_queue.put(None)
                 tts_thread.join()
+                from voice_pipeline import _extract_recommendations
+                meds = _extract_recommendations(all_text)
+                if meds:
+                    output_queue.put(("recommend", meds))
                 output_queue.put(("done", None))
 
         threading.Thread(target=process, daemon=True).start()
@@ -677,6 +681,8 @@ def ollama_chat():
                 yield f"data: {json.dumps({'type': 'delta', 'content': data}, ensure_ascii=False)}\n\n"
             elif msg_type == "audio":
                 yield f"data: {json.dumps({'type': 'ai_audio', 'data': data}, ensure_ascii=False)}\n\n"
+            elif msg_type == "recommend":
+                yield f"data: {json.dumps({'type': 'recommend', 'medicines': data}, ensure_ascii=False)}\n\n"
             elif msg_type == "error":
                 yield f"data: {json.dumps({'type': 'error', 'message': data}, ensure_ascii=False)}\n\n"
                 break
